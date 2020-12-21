@@ -15,7 +15,7 @@
 //!
 //! fn main () {
 //!   let mut base = Convert::new(4,500);
-//!   let output = base.convert::<u8,u16>(&vec![1,1,1,1,2,2,1,0,2,2,0,0,2,1]);
+//!   let output = base.convert::<u8,u16>(&vec![1,1,1,1,2,2,1,0,2,2,0,0,2,1]).unwrap();
 //!   assert_eq!{output, vec![397, 150, 405]};
 //! }
 //! ```
@@ -31,7 +31,7 @@
 //!     3_900_000_000, 3_500_004_500, 3_000_000_000, 2_500_000_000,
 //!     2_000_000_000, 1_500_000_000, 1_000_003_300, 2_500_000_000,
 //!     3_000_000_000, 3_700_050_000, 2_400_000_000, 1_250_000_052
-//!   ]);
+//!   ]).unwrap();
 //!   assert_eq![output, vec!{
 //!     300, 71, 255, 325, 23, 591, 267, 188, 488, 553, 124, 54, 422, 411, 116,
 //!     411, 85, 558, 4, 498, 384, 106, 465, 635, 75, 120, 226, 18, 634, 631,
@@ -68,7 +68,13 @@
 //! * from base 243 to base 9 in 0.0149 seconds
 //! * from base 243 to base 10 in 125.3 seconds
 
-use std::ops::{Add, Div, Rem};
+use anyhow::Result;
+use std::{
+	convert::TryFrom,
+	error::Error,
+	marker::{Send, Sync},
+	ops::{Add, Div, Rem},
+};
 
 /// Convert the radix (base) of digits stored in a vector.
 pub struct Convert {
@@ -103,6 +109,7 @@ impl Convert {
 		}
 		Convert { from, to, ratio }
 	}
+
 	/// Create a new converter but don't test for alignment.
 	pub fn new_unaligned(from: u64, to: u64) -> Self {
 		Convert {
@@ -111,6 +118,7 @@ impl Convert {
 			ratio: (0, 0),
 		}
 	}
+
 	/// Perform the conversion on `input` which contains digits in base
 	/// `self.from`. You should specify the `Output` type so that the target base
 	/// (`self.to`) fits. There are no checks to ensure the `Output` type has
@@ -118,15 +126,16 @@ impl Convert {
 	///
 	/// For input and output vectors, the least significant digit is at the
 	/// beginning of the array.
-	pub fn convert<Input, Output>(&mut self, input: &[Input]) -> Vec<Output>
+	pub fn convert<Input, Output>(&mut self, input: &[Input]) -> Result<Vec<Output>>
 	where
 		Output: Copy
+			+ TryFrom<u64>
 			+ Into<u64>
 			+ From<u8>
-			+ FromU64
 			+ Add<Output, Output = Output>
 			+ Div<Output, Output = Output>
 			+ Rem<Output, Output = Output>,
+		<Output as TryFrom<u64>>::Error: Error + Sync + Send + 'static,
 		Input: Copy + Into<u64>,
 	{
 		let len = input.len();
@@ -138,10 +147,10 @@ impl Convert {
 		let mut offset = 0;
 		for (i, x) in input.iter().enumerate() {
 			Self::copy(&mut v0, &base);
-			self.multiply_scalar_into(&mut v0, (*x).into());
-			self.add_into(&mut output, &v0, offset);
+			self.multiply_scalar_into(&mut v0, (*x).into())?;
+			self.add_into(&mut output, &v0, offset)?;
 			if i + 1 < input.len() {
-				self.multiply_scalar_into(&mut base, self.from);
+				self.multiply_scalar_into(&mut base, self.from)?;
 			}
 			if step > 0 && i % step == step - 1 {
 				base.clear();
@@ -149,8 +158,9 @@ impl Convert {
 				offset += self.ratio.1;
 			}
 		}
-		output
+		Ok(output)
 	}
+
 	fn copy<T>(dst: &mut Vec<T>, src: &Vec<T>) -> ()
 	where
 		T: Copy,
@@ -160,87 +170,67 @@ impl Convert {
 			dst.push(*x);
 		}
 	}
-	fn multiply_scalar_into<T>(&self, dst: &mut Vec<T>, x: u64) -> ()
+
+	fn multiply_scalar_into<T>(&self, dst: &mut Vec<T>, x: u64) -> Result<()>
 	where
-		T: Copy + Into<u64> + FromU64,
+		T: Copy + TryFrom<u64> + Into<u64>,
+		<T as TryFrom<u64>>::Error: Error + Sync + Send + 'static,
 	{
 		let mut carry = 0u64;
 		for i in 0..dst.len() {
 			let res = dst[i].into() * x + carry;
 			carry = res / self.to;
-			dst[i] = FromU64::from(res % (self.to as u64));
+			dst[i] = T::try_from(res % (self.to as u64))?;
 		}
 		while carry > 0 {
-			dst.push(FromU64::from(carry % self.to));
+			dst.push(T::try_from(carry % self.to)?);
 			carry /= self.to;
 		}
+		Ok(())
 	}
-	fn add_into<T>(&self, dst: &mut Vec<T>, src: &Vec<T>, offset: usize) -> ()
+
+	fn add_into<T>(&self, dst: &mut Vec<T>, src: &Vec<T>, offset: usize) -> Result<()>
 	where
 		T: Copy
+			+ TryFrom<u64>
 			+ Into<u64>
-			+ FromU64
 			+ Add<T, Output = T>
 			+ Div<T, Output = T>
 			+ Rem<T, Output = T>,
+		<T as TryFrom<u64>>::Error: Error + Sync + Send + 'static,
 	{
 		let mut carry = 0u64;
 		let mut i = 0;
 		while dst.len().max(offset) - offset < src.len() {
-			dst.push(FromU64::from(0));
+			dst.push(T::try_from(0)?);
 		}
 		loop {
 			let j = i + offset;
 			if i < src.len() && j < dst.len() {
 				let res = src[i].into() + dst[j].into() + carry;
 				carry = res / self.to;
-				dst[j] = FromU64::from(res % self.to);
+				dst[j] = T::try_from(res % self.to)?;
 			} else if j < dst.len() {
 				let res = dst[j].into() + carry;
 				carry = res / self.to;
-				dst[j] = FromU64::from(res % self.to);
+				dst[j] = T::try_from(res % self.to)?;
 			} else if i < src.len() {
 				let res = src[i].into() + carry;
 				carry = res / self.to;
-				dst.push(FromU64::from(res % self.to));
+				dst.push(T::try_from(res % self.to)?);
 			} else if carry > 0 {
 				let res = carry;
 				carry = res / self.to;
-				dst.push(FromU64::from(res % self.to));
+				dst.push(T::try_from(res % self.to)?);
 			} else {
 				break;
 			}
 			i += 1;
 		}
+		Ok(())
 	}
 }
 
 fn ulog2(x: u64) -> usize {
 	(63 - x.leading_zeros()) as usize
-}
-
-// custom trait because TryFrom is difficult:
-#[doc(hidden)]
-pub trait FromU64 {
-	fn from(n: u64) -> Self;
-}
-impl FromU64 for u8 {
-	fn from(n: u64) -> Self {
-		n as u8
-	}
-}
-impl FromU64 for u16 {
-	fn from(n: u64) -> Self {
-		n as u16
-	}
-}
-impl FromU64 for u32 {
-	fn from(n: u64) -> Self {
-		n as u32
-	}
-}
-impl FromU64 for u64 {
-	fn from(n: u64) -> Self {
-		n as u64
-	}
 }

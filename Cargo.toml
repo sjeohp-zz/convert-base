@@ -11,3 +11,6 @@ keywords = [ "base", "convert", "radix" ]
 categories = [ "algorithms", "encoding" ]
 authors = [ "*" ]
 edition = "2018"
+
+[dependencies]
+anyhow = "1"
